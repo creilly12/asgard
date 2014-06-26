@@ -44,6 +44,7 @@ class RollingPushOperation extends AbstractPushOperation {
     private static final log = LogFactory.getLog(this)
 
     def awsEc2Service
+    def awsLoadBalancerService
     def configService
     def discoveryService
     def launchTemplateService
@@ -166,6 +167,10 @@ class RollingPushOperation extends AbstractPushOperation {
                 handleInitialPhase(instanceInfo, userContext, discoveryExists, afterDiscovery)
                 break
 
+            case InstanceState.unregistering:
+                handleUnregisteringPhase(timeSinceChange, instanceInfo, userContext)
+                break
+
             case InstanceState.unregistered:
                 // Shut down abruptly or wait for clients of the instance to adjust to the change.
                 handleUnregisteredPhase(timeSinceChange, afterDiscovery, instanceInfo, userContext)
@@ -186,7 +191,7 @@ class RollingPushOperation extends AbstractPushOperation {
                 break
 
             case InstanceState.registered:
-                handleRegisteredPhase(instanceInfo, timeForPeriodicLogging)
+                handleRegisteredPhase(userContext, instanceInfo, timeForPeriodicLogging)
                 break
 
             case InstanceState.snoozing:
@@ -209,12 +214,6 @@ class RollingPushOperation extends AbstractPushOperation {
         // Disable the app in discovery and ELBs so that clients don't try to talk to it
         String appName = options.common.appName
         String appInstanceId = "${appName} / ${instanceInfo.id}"
-        if (loadBalancerNames) {
-            task.log("Disabling ${appInstanceId} in ${loadBalancerNames.size()} ELBs.")
-            for (String loadBalancerName in loadBalancerNames) {
-                awsLoadBalancerService.removeInstances(userContext, loadBalancerName, [instanceInfo.id], task)
-            }
-        }
         if (discoveryExists) {
             discoveryService.disableAppInstances(userContext, appName, [instanceInfo.id], task)
             if (options.rudeShutdown) {
@@ -223,7 +222,39 @@ class RollingPushOperation extends AbstractPushOperation {
                 task.log("Waiting ${Time.format(afterDiscovery)} for clients to stop using ${appInstanceId}")
             }
         }
-        instanceInfo.state = InstanceState.unregistered
+        if (loadBalancerNames) {
+            task.log("Disabling ${appInstanceId} in ${loadBalancerNames.size()} ELBs.")
+            for (String loadBalancerName in loadBalancerNames) {
+                awsLoadBalancerService.removeInstances(userContext, loadBalancerName, [instanceInfo.id], task)
+            }
+            instanceInfo.state = InstanceState.unregistering
+            String duration = Time.format(InstanceState.unregistering.timeOutToExitState)
+            task.log("Waiting up to ${duration} for instances [$instanceInfo.id] to deregister.")
+        } else {
+            instanceInfo.state = InstanceState.unregistered
+        }
+    }
+
+    private void handleUnregisteringPhase(Duration timeSinceChange, InstanceMetaData instanceInfo, UserContext userContext) {
+        boolean still_waiting = false
+        if (loadBalancerNames) {
+            // Once instance deregistration is complete, they aren't seen by the load balancer.
+            def freshGroup = checkGroupStillExists(userContext, options.groupName, From.AWS_NOCACHE)
+            String loadBalancerStillSeesInServiceInstance = loadBalancerNames.find {
+                if (loadBalancerNames.size() > 1) { Time.sleepCancellably(250)}
+                awsLoadBalancerService.getInstanceStateDatas(userContext, it, [freshGroup]).find {
+                    it.instanceId == instanceInfo.id && it.state == "InService"
+                }
+            }
+
+            if (loadBalancerStillSeesInServiceInstance) {
+                still_waiting = true
+            }
+        }
+
+        if (!still_waiting) {
+            instanceInfo.state = InstanceState.unregistered
+        }
     }
 
     private void handleUnregisteredPhase(Duration timeSinceChange, Duration afterDiscovery,
@@ -319,6 +350,16 @@ class RollingPushOperation extends AbstractPushOperation {
                     task.log("Waiting up to ${timeout} for health check pass at ${healthCheckUrl}")
                 }
             }
+        } else if (loadBalancerNames) {
+            // For autoscaling groups with ELB health check, there's an additional wait.
+            def freshGroup = checkGroupStillExists(userContext, options.groupName, From.AWS_NOCACHE)
+            if (freshGroup.healthCheckType == "ELB") {
+                instanceInfo.state = InstanceState.registered
+                String timeout = Time.format(InstanceState.registered.timeOutToExitState)
+                task.log("Waiting up to ${timeout} for ELB health check pass.")
+            } else {
+                startSnoozing(instanceInfo)
+            }
         }
         // If check health is off, prepare for final wait
         else {
@@ -326,7 +367,7 @@ class RollingPushOperation extends AbstractPushOperation {
         }
     }
 
-    private void handleRegisteredPhase(InstanceMetaData instanceInfo, boolean timeForPeriodicLogging) {
+    private void handleRegisteredPhase(UserContext userContext, InstanceMetaData instanceInfo, boolean timeForPeriodicLogging) {
         // If there's a health check URL then check it before preparing for final wait
         if (instanceInfo.healthCheckUrl) {
             Integer responseCode = restClientService.getRepeatedResponseCode(instanceInfo.healthCheckUrl)
@@ -343,6 +384,23 @@ class RollingPushOperation extends AbstractPushOperation {
             if (healthy) {
                 task.log("It took ${Time.format(instanceInfo.timeSinceChange)} for instance " +
                         "${instanceInfo.id} to go from registered to healthy")
+                startSnoozing(instanceInfo)
+            }
+        } else if (loadBalancerNames) {
+            // There is an ELB health check so wait for wait for healthy according to the ELB.
+            def freshGroup = checkGroupStillExists(userContext, options.groupName, From.AWS_NOCACHE)
+            String loadBalancerThatSeesOutOfServiceInstance = loadBalancerNames.find {
+                if (loadBalancerNames.size() > 1) {
+                    Time.sleepCancellably(250)
+                }
+                awsLoadBalancerService.getInstanceStateDatas(userContext, it, [freshGroup]).find {
+                    it.autoScalingGroupName == freshGroup.autoScalingGroupName &&
+                            it.instanceId == instanceInfo.id && it.state != "InService"
+                }
+            }
+            if (!loadBalancerThatSeesOutOfServiceInstance) {
+                task.log("It took ${Time.format(instanceInfo.timeSinceChange)} for instance " +
+                        "${instanceInfo.id} to go from registered to healthy.")
                 startSnoozing(instanceInfo)
             }
         }
