@@ -191,7 +191,7 @@ class RollingPushOperation extends AbstractPushOperation {
                 break
 
             case InstanceState.registered:
-                handleRegisteredPhase(instanceInfo, timeForPeriodicLogging)
+                handleRegisteredPhase(userContext, instanceInfo, timeForPeriodicLogging)
                 break
 
             case InstanceState.snoozing:
@@ -240,10 +240,10 @@ class RollingPushOperation extends AbstractPushOperation {
         boolean still_waiting = false
         if (loadBalancerNames) {
             // Once instance deregistration is complete, they aren't seen by the load balancer.
-            AutoScalingGroup group = awsAutoScalingService.getAutoScalingGroup(userContext, options.groupName)
+            def freshGroup = checkGroupStillExists(userContext, options.groupName, From.AWS_NOCACHE)
             String loadBalancerStillSeesInServiceInstance = loadBalancerNames.find {
                 if (loadBalancerNames.size() > 1) { Time.sleepCancellably(250)}
-                awsLoadBalancerService.getInstanceStateDatas(userContext, it, [group]).find {
+                awsLoadBalancerService.getInstanceStateDatas(userContext, it, [freshGroup]).find {
                     it.instanceId == instanceInfo.id && it.state == "InService"
                 }
             }
@@ -351,6 +351,16 @@ class RollingPushOperation extends AbstractPushOperation {
                     task.log("Waiting up to ${timeout} for health check pass at ${healthCheckUrl}")
                 }
             }
+        } else if (loadBalancerNames) {
+            // For autoscaling groups with ELB health check, there's an additional wait.
+            def freshGroup = checkGroupStillExists(userContext, options.groupName, From.AWS_NOCACHE)
+            if (freshGroup.healthCheckType == "ELB") {
+                instanceInfo.state = InstanceState.registered
+                String timeout = Time.format(InstanceState.registered.timeOutToExitState)
+                task.log("Waiting up to ${timeout} for ELB health check pass.")
+            } else {
+                startSnoozing(instanceInfo)
+            }
         }
         // If check health is off, prepare for final wait
         else {
@@ -358,7 +368,7 @@ class RollingPushOperation extends AbstractPushOperation {
         }
     }
 
-    private void handleRegisteredPhase(InstanceMetaData instanceInfo, boolean timeForPeriodicLogging) {
+    private void handleRegisteredPhase(UserContext userContext, InstanceMetaData instanceInfo, boolean timeForPeriodicLogging) {
         // If there's a health check URL then check it before preparing for final wait
         if (instanceInfo.healthCheckUrl) {
             Integer responseCode = restClientService.getRepeatedResponseCode(instanceInfo.healthCheckUrl)
@@ -375,6 +385,23 @@ class RollingPushOperation extends AbstractPushOperation {
             if (healthy) {
                 task.log("It took ${Time.format(instanceInfo.timeSinceChange)} for instance " +
                         "${instanceInfo.id} to go from registered to healthy")
+                startSnoozing(instanceInfo)
+            }
+        } else if (loadBalancerNames) {
+            // There is an ELB health check so wait for wait for healthy according to the ELB.
+            def freshGroup = checkGroupStillExists(userContext, options.groupName, From.AWS_NOCACHE)
+            String loadBalancerThatSeesOutOfServiceInstance = loadBalancerNames.find {
+                if (loadBalancerNames.size() > 1) {
+                    Time.sleepCancellably(250)
+                }
+                awsLoadBalancerService.getInstanceStateDatas(userContext, it, [freshGroup]).find {
+                    it.autoScalingGroupName == freshGroup.autoScalingGroupName &&
+                            it.instanceId == instanceInfo.id && it.state != "InService"
+                }
+            }
+            if (!loadBalancerThatSeesOutOfServiceInstance) {
+                task.log("It took ${Time.format(instanceInfo.timeSinceChange)} for instance " +
+                        "${instanceInfo.id} to go from registered to healthy.")
                 startSnoozing(instanceInfo)
             }
         }
