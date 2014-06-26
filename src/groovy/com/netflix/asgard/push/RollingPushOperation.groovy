@@ -232,7 +232,6 @@ class RollingPushOperation extends AbstractPushOperation {
             task.log("Waiting up to ${duration} for instances [$instanceInfo.id] to deregister.")
         } else {
             instanceInfo.state = InstanceState.unregistered
-
         }
     }
 
