@@ -18,14 +18,15 @@ package com.netflix.asgard.push
 import org.joda.time.Duration
 
 enum InstanceState {
-    initial      (unlimited()),
-    unregistered (unlimited()),
-    terminated   (minutes(70)),
-    pending      (minutes(50)),
-    running      (minutes(35)),
-    registered   (minutes(60)),
-    snoozing     (unlimited()),
-    ready        (unlimited())
+    initial       (unlimited()),
+    unregistering (minutes(50)),
+    unregistered  (unlimited()),
+    terminated    (minutes(70)),
+    pending       (minutes(50)),
+    running       (minutes(35)),
+    registered    (minutes(60)),
+    snoozing      (unlimited()),
+    ready         (unlimited())
 
     /**
      * The maximum time before an attempt to EXIT a given state is considered a failure.
