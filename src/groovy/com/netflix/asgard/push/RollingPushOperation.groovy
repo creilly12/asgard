@@ -239,6 +239,8 @@ class RollingPushOperation extends AbstractPushOperation {
         boolean still_waiting = false
         if (loadBalancerNames) {
             // Once instance deregistration is complete, they aren't seen by the load balancer.
+            // prevent rate limiting
+            Time.sleepCancellably(20)
             def freshGroup = checkGroupStillExists(userContext, options.groupName, From.AWS_NOCACHE)
             String loadBalancerStillSeesInServiceInstance = loadBalancerNames.find {
                 if (loadBalancerNames.size() > 1) { Time.sleepCancellably(250)}
