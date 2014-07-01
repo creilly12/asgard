@@ -118,6 +118,8 @@ class RollingPushOperation extends AbstractPushOperation {
                 securityGroups: securityGroups, instanceType: options.instanceType,
                 kernelId: oldLaunch.kernelId, ramdiskId: oldLaunch.ramdiskId, iamInstanceProfile: iamInstanceProfile,
                 ebsOptimized: oldLaunch.ebsOptimized,
+                instanceMonitoringIsEnabled: options.instanceMonitoringIsEnabled != null ?
+                        options.instanceMonitoringIsEnabled : configService.enableInstanceMonitoring,
                 instancePriceType: options.spotPrice ? InstancePriceType.SPOT : InstancePriceType.ON_DEMAND
         )
         UserContext userContext = options.common.userContext

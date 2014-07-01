@@ -22,6 +22,7 @@ final class RollingPushOptions {
     Boolean newestFirst
     Boolean rudeShutdown
     String iamInstanceProfile
+    Boolean instanceMonitoringIsEnabled
     String spotPrice
     String keyName
 
